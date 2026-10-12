@@ -1,0 +1,8 @@
+# Bundle patch layer for dsh-chat-eraser.
+#
+# The row loads this package's main entry as the host half (a plain Cordis
+# plugin that serves the /chat-eraser routes); the `dsh.client` declaration in
+# package.json makes the web app load ./client as the browser half.
+- insert:
+    - id: chat-eraser
+      name: dsh-chat-eraser

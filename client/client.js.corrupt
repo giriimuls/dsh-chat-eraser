@@ -1,0 +1,614 @@
+/**
+ * dsh-chat-eraser — browser half.
+ *
+ * A Module Loader bundle (`window.__ModuleLoader__.load({ id, factory })`), the
+ * same shape every shipped client plugin uses: running the script only
+ * registers the factory, and the module body runs at materialization. It
+ * requires only baseline externals — React, the shared control primitives, and
+ * the shared snapshot store — so it needs no `dsh.client.external` entry.
+ *
+ * It contributes three registrations:
+ *
+ *   sidebar.workspaces.session.menu.item  "Delete session" row in the ... menu
+ *   conversation.chat.turnTail            a per-turn delete control
+ *   shell.overlay                         the confirmation dialog for both
+ *
+ * Both affordances call the host half's routes and then close the loop in place:
+ * a deleted session is archived through the host, so its row leaves on the
+ * host's own workspace event, and a rewrite the harness cannot re-read is
+ * reported rather than left to look like a failure.
+ */
+window.__ModuleLoader__.load({
+  id: 'dsh-chat-eraser',
+  factory: (require) => {
+    const React = require('react')
+    const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
+    const store = require('@deepseek-ai/dsh-client-store')
+
+    const h = React.createElement
+    const NS = 'chat-eraser'
+
+    /** User-facing copy. Keys are flat so both dictionaries stay comparable. */
+    const en = {
+      'menu.deleteSession': 'Delete session',
+      'prompt.edit': 'Edit prompt',
+      'prompt.delete': 'Delete prompt',
+      'prompt.tooltip': 'Edit or delete this prompt',
+      'reply.delete': 'Delete reply',
+      'edit.title': 'Edit prompt {turn}',
+      'edit.body': 'Sending replaces this prompt: its reply and everything after it are removed, then your text goes to the composer � press Send there to get a new reply.',
+      'edit.send': 'Send',
+      'edit.busy': 'Replacing�',
+      'edit.done': 'Replaced',
+      'turn.tooltip': 'Delete this turn and every later turn',
+      'dialog.session.title': 'Delete this session?',
+      'dialog.session.body':
+        'The session is removed from disk: its log, its projection cache and its sidebar membership. This cannot be undone from the app.',
+      'dialog.turn.title': 'Delete turn {turn}?',
+      'dialog.turn.body':
+        'Turn {turn} and every later turn are removed from this session. Earlier turns are kept. The original log is copied to the plugin backup folder first.',
+      'dialog.confirm': 'Delete',
+      'dialog.cancel': 'Cancel',
+      'dialog.busy': 'Deleting…',
+      'dialog.done': 'Deleted',
+      'dialog.error': 'Delete failed: {message}',
+      'notice.title': 'Already deleted',
+      'notice.session.body':
+        'The removal is durable, but this harness still holds the session in memory, so it is still listed. Closing and reopening DeepSeek Harness refreshes the list.',
+      'notice.turn.body':
+        'The turn was removed from the log, but this harness keeps serving the copy it mounted when it opened the session, so the transcript still shows it. Closing and reopening DeepSeek Harness refreshes the transcript.',
+      'notice.close': 'Understood'
+    }
+    const zh = {
+      'menu.deleteSession': '删除会话',
+      'turn.delete': '删除该轮',
+      'turn.tooltip': '删除该轮及其之后的全部对话',
+      'dialog.session.title': '确定删除这个会话？',
+      'dialog.session.body':
+        '将从磁盘移除该会话：日志、投影缓存以及侧边栏成员关系都会被删除。应用内无法撤销。',
+      'dialog.turn.title': '确定删除第 {turn} 轮？',
+      'dialog.turn.body':
+        '第 {turn} 轮及其之后的对话都会从该会话中移除，之前的轮次保留。改写前原日志会备份到插件备份目录。',
+      'dialog.confirm': '删除',
+      'dialog.cancel': '取消',
+      'dialog.busy': '删除中…',
+      'dialog.done': '已删除',
+      'dialog.error': '删除失败：{message}',
+      'notice.title': '已经从磁盘删除',
+      'notice.session.body':
+        '删除已经落盘，但当前 Harness 进程仍把该会话保存在内存里，所以列表里还看得到。关闭并重新打开 DeepSeek Harness 即可刷新列表。',
+      'notice.turn.body':
+        '该轮已经从日志中删除，但当前 Harness 仍在返回它打开会话时载入的那份副本，所以对话里还看得到。关闭并重新打开 DeepSeek Harness 即可刷新对话。',
+      'notice.close': '我知道了'
+    }
+
+    /** Shared styles, injected once per page through the plugin's own style tag. */
+    const CSS = [
+      '.chat-eraser-turn{display:flex;align-items:center;margin-top:4px;min-height:20px}',
+      '.chat-eraser-button{display:inline-flex;align-items:center;gap:6px;box-sizing:border-box;border:none;',
+      'background:transparent;border-radius:999px;padding:1px 8px;cursor:pointer;',
+      'font:inherit;font-size:calc(var(--dsh-content-font-size-secondary,13px) - 1px);',
+      'color:var(--dsw-alias-label-tertiary,#8a8a8a);opacity:.45;transition:opacity .12s ease,background .12s ease}',
+      '.chat-eraser-button:hover{opacity:1;background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));',
+      'color:var(--dsw-alias-label-secondary,#4a4a4a)}',
+      '.chat-eraser-button:focus-visible{opacity:1;outline:2px solid var(--dsw-alias-separator-primary,rgba(127,127,127,.4));outline-offset:2px}',
+      '.chat-eraser-button svg{flex:none;width:14px;height:14px}',
+      '.chat-eraser-body{margin:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary,#4a4a4a)}',
+      '.chat-eraser-error{margin:8px 0 0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-error,#d93025)}'
+    ].join('')
+
+    if (typeof document !== 'undefined') {
+      const tagId = 'dsh-chat-eraser/styles.css'
+      if (document.querySelector(`style[data-plugin-css=${JSON.stringify(tagId)}]`) === null) {
+        const tag = document.createElement('style')
+        tag.dataset.plugin = 'dsh-chat-eraser'
+        tag.dataset.pluginCss = tagId
+        tag.textContent = CSS
+        document.head.appendChild(tag)
+      }
+    }
+
+    /**
+     * The pending confirmation. One dialog serves both deletions: the request
+     * carries which one it is, so nothing else has to be kept in sync.
+     */
+    const deleteRequest = store.createSnapshotStore(null)
+
+    /** Open the confirmation dialog for one deletion request. */
+    function requestDelete(request) {
+      deleteRequest.set(request)
+    }
+
+    /** Close the dialog without acting. */
+    function settleDelete() {
+      deleteRequest.set(null)
+    }
+
+    /** The post-operation message, when a removal did not reach this page. */
+    const noticeRequest = store.createSnapshotStore(null)
+
+    /** The workspace's own navigation object layer, once the plugin resolves it. */
+    let workspaceUi = null
+
+    /**
+     * Ask the host half to delete. There is no page reload: a deleted session
+     * leaves on the host's own archive event, and a released session comes back
+     * through `uiWorkspace.openSession`, which re-reads the rewritten log.
+     * Reloading here is what produced a flash of the empty New Session view and
+     * then brought the row straight back from the harness's in-memory list.
+     * @param request - the pending deletion request.
+     * @returns the host's summary.
+     */
+    async function runDelete(request) {
+      const path = request.kind === 'session'
+        ? '/chat-eraser/delete-session'
+        : request.kind === 'reply' ? '/chat-eraser/delete-reply' : '/chat-eraser/delete-turn'
+      const body = request.kind === 'session'
+        ? { sessionId: request.sessionId }
+        : { sessionId: request.sessionId, turn: request.turn }
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        cache: 'no-store'
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok || payload === null || payload.ok !== true) {
+        const code = payload?.error?.code ?? `http-${response.status}`
+        const message = payload?.error?.message ?? response.statusText ?? 'request failed'
+        // The view offered something the log does not have: a mounted harness is
+        // serving an older copy of this session, which is a stale view around a
+        // removal that already happened — not a failure of this one.
+        if (code === 'unknown-turn' || code === 'session-not-found' || code === 'no-reply') {
+          noticeRequest.set({ kind: request.kind, sessionId: request.sessionId, turn: request.turn ?? null })
+        }
+        throw new Error(`${code}: ${message}`)
+      }
+      if (request.kind !== 'session') reopenSession(request.sessionId)
+      reportUnreflected(request, payload)
+      return payload
+    }
+
+    /**
+     * Ask the workspace to open the session again.
+     *
+     * The host released the session, so this re-requests it and the transcript
+     * is rebuilt from the rewritten log instead of the copy the harness had
+     * mounted. Without it the released session's view goes empty and the reader
+     * would have to click the row again to see the edit.
+     * @param sessionId - session that was released.
+     */
+    function reopenSession(sessionId) {
+      window.setTimeout(() => {
+        try {
+          workspaceUi?.openSession?.(sessionId)
+        } catch {
+          /* the reader can always reopen the session from the sidebar */
+        }
+      }, 250)
+    }
+
+    /**
+     * Close the loop in this page: say so when the removal is durable but the
+     * harness kept serving what it had already loaded.
+     * @param request - the deletion that just succeeded.
+     * @param payload - the host's answer, including the archive and release results.
+     */
+    function reportUnreflected(request, payload) {
+      const settleMs = request.kind === 'turn' ? 3000 : 900
+      window.setTimeout(() => {
+        try {
+          if (!isUnreflected(request, payload)) return
+          noticeRequest.set({ kind: request.kind, sessionId: request.sessionId, turn: request.turn ?? null })
+        } catch {
+          /* reporting is best-effort and never blocks the app */
+        }
+      }, settleMs)
+    }
+
+    /** Whether this page still shows something the removal already took away. */
+    function isUnreflected(request, payload) {
+      if (typeof request?.sessionId !== 'string') return false
+      if (request.kind === 'session') {
+        // A session is archived and released through the host on the way out;
+        // only a refusal leaves the row behind.
+        if (payload?.archive?.archived === true) return false
+        return document.querySelectorAll(`[data-row-key="session:${request.sessionId}"]`).length > 0
+      }
+      const tails = [...document.querySelectorAll('[data-turn-tail]')]
+      if (tails.length === 0) return false
+      // The host reports which turns survive the cut, so a transcript that
+      // renders a later turn than that is demonstrably serving the old copy.
+      const remaining = Array.isArray(payload?.remainingTurns) ? payload.remainingTurns : null
+      const last = remaining === null || remaining.length === 0
+        ? (typeof request.turn === 'number' ? request.turn - 1 : null)
+        : Math.max(...remaining)
+      if (last === null) return false
+      const highest = Math.max(...tails.map((node) => Number(node.dataset.turnTail)))
+      return Number.isFinite(highest) && highest > last
+    }
+
+    /** The pending prompt edit, with the text the dialog is prefilled with. */
+    const editRequest = store.createSnapshotStore(null)
+
+    /**
+     * Open the edit dialog for one turn, prefilled with that turn's prompt.
+     * The prompt text comes from the log, so what the reader edits is what was
+     * actually sent, not the rendered projection of it.
+     * @param request - session, turn, and the composer's input actions.
+     */
+    async function requestEdit(request) {
+      const query = `sessionId=${encodeURIComponent(request.sessionId)}&turn=${request.turn}`
+      try {
+        const response = await fetch(`/chat-eraser/turn?${query}`, { cache: 'no-store' })
+        const payload = await response.json().catch(() => null)
+        if (!response.ok || payload?.ok !== true) {
+          throw new Error(payload?.error?.message ?? `HTTP ${response.status}`)
+        }
+        editRequest.set({ ...request, prompt: payload.turn.prompt ?? '', failure: null })
+      } catch (error) {
+        editRequest.set({ ...request, prompt: '', failure: String(error?.message ?? error) })
+      }
+    }
+
+    /** Close the edit dialog without acting. */
+    function settleEdit() {
+      editRequest.set(null)
+    }
+
+    /**
+     * Replace a prompt: cut the turn (prompt, reply and everything after it),
+     * then hand the edited text to the composer, which is the harness's own
+     * submission path — press Send there and the new reply is produced.
+     * @param request - the pending edit.
+     * @param text - the edited prompt text.
+     * @returns the host's cut summary.
+     */
+    async function runEdit(request, text) {
+      const response = await fetch('/chat-eraser/delete-turn', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: request.sessionId, turn: request.turn }),
+        cache: 'no-store'
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok || payload === null || payload.ok !== true) {
+        throw new Error(payload?.error?.message ?? `HTTP ${response.status}`)
+      }
+      reopenSession(request.sessionId)
+      // The composer is remounted by the reopen, so the insertion span is
+      // captured after it settles rather than while the old editor is current.
+      window.setTimeout(() => {
+        try {
+          const actions = request.inputActions
+          if (typeof actions?.insertText !== 'function') return
+          const span = typeof actions.captureInsertion === 'function' ? actions.captureInsertion() : undefined
+          actions.insertText(text, span)
+        } catch {
+          /* the reader can retype; the cut already happened */
+        }
+      }, 900)
+      return payload
+    }
+
+    /** The prompt edit dialog: a prefilled draft, and one Send. */
+    function EraserEditDialog(props) {
+      const { useEditRequest, settleEdit: settle, runEdit: run, t } = props
+      const request = useEditRequest((value) => value)
+      const [text, setText] = React.useState('')
+      const [phase, setPhase] = React.useState('idle')
+      const [failure, setFailure] = React.useState(null)
+      const [seen, setSeen] = React.useState(null)
+
+      const identity = request === null ? null : `${request.sessionId}:${request.turn}`
+      if (seen !== identity) {
+        setSeen(identity)
+        setText(request?.prompt ?? '')
+        setPhase('idle')
+        setFailure(request?.failure ?? null)
+      }
+      if (request === null) return null
+
+      const send = () => {
+        if (phase === 'busy' || text.trim() === '') return
+        setPhase('busy')
+        setFailure(null)
+        run(request, text).then(
+          () => setPhase('done'),
+          (error) => {
+            setFailure(String(error?.message ?? error))
+            setPhase('idle')
+          }
+        )
+      }
+
+      return h(
+        primitives.Modal,
+        {
+          open: true,
+          title: t('edit.title', { turn: request.turn }),
+          closeLabel: t('dialog.cancel'),
+          onClose: phase === 'busy' ? () => {} : settle,
+          footer: [
+            h(primitives.Button, { key: 'cancel', variant: 'ghost', disabled: phase !== 'idle', onClick: settle }, t('dialog.cancel')),
+            h(
+              primitives.Button,
+              { key: 'send', variant: 'primary', disabled: phase === 'busy' || text.trim() === '', onClick: send },
+              phase === 'done' ? t('edit.done') : phase === 'busy' ? t('edit.busy') : t('edit.send')
+            )
+          ]
+        },
+        h('p', { className: 'chat-eraser-body' }, t('edit.body', { turn: request.turn })),
+        h('textarea', {
+          className: 'chat-eraser-editor',
+          value: text,
+          rows: 6,
+          spellCheck: false,
+          disabled: phase !== 'idle',
+          'aria-label': t('edit.title', { turn: request.turn }),
+          onChange: (event) => setText(event.target.value)
+        }),
+        failure === null ? null : h('p', { className: 'chat-eraser-error' }, t('dialog.error', { message: failure }))
+      )
+    }
+
+    /** One `...` menu row: delete the whole session. */
+    function DeleteSessionMenuItem(props) {      const { displayTitle, useMenuOpenState, requestDelete: ask, t } = props
+      const [, setMenuOpen] = useMenuOpenState()
+      return h(
+        primitives.MenuItemButton,
+        {
+          separatorBefore: true,
+          icon: h(primitives.IconTrashOutlineRegular, { size: 14 }),
+          onSelect: () => {
+            setMenuOpen(false)
+            ask({ kind: 'session', sessionId: props.sessionId, displayTitle })
+          }
+        },
+        t('menu.deleteSession')
+      )
+    }
+
+    /**
+     * The turn's own action cluster: edit the prompt, or delete it.
+     *
+     * The owner's currency carries the Turn **record** (`{ turn, status, steps,
+     * data }`), so the number is `turn.turn`. A turn that is still open is being
+     * written right now, and the host refuses to rewrite it, so the controls are
+     * withheld until it settles instead of offering calls that must fail.
+     */
+    function TurnActions(props) {
+      const { turn, sessionId, requestDelete: ask, requestEdit, inputActions, t } = props
+      const turnNumber = typeof turn === 'number' ? turn : turn?.turn
+      if (!Number.isInteger(turnNumber)) return null
+      if (turn?.status === 'open') return null
+      const icon = (key, label, onClick) =>
+        h(
+          primitives.Tooltip,
+          { key, label, side: 'bottom', delayMs: 400 },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'chat-eraser-button',
+              'aria-label': `${label} ${turnNumber}`,
+              onClick
+            },
+            h(key === 'edit' ? primitives.IconEditOutlineRegular : primitives.IconTrashOutlineRegular, { size: 14 }),
+            h('span', null, label)
+          )
+        )
+      return h(
+        'div',
+        { className: 'chat-eraser-turn' },
+        icon('edit', t('prompt.edit'), () => requestEdit({ sessionId, turn: turnNumber, inputActions })),
+        icon('delete', t('prompt.delete'), () => ask({ kind: 'prompt', sessionId, turn: turnNumber }))
+      )
+    }
+
+    /**
+     * One reply action inside the shipped hover bar (next to copy, like, dislike).
+     *
+     * The currency is `{ messageId }`, and the bar lives inside the turn's own
+     * DOM seat, so the turn number is read from the `data-turn-tail` ancestor the
+     * shipped renderer already marks.
+     */
+    function DeleteReplyAction(props) {
+      const { sessionId, requestDelete: ask, t } = props
+      return h(
+        primitives.Tooltip,
+        { label: t('reply.delete'), side: 'bottom', delayMs: 400 },
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'chat-eraser-action',
+            'aria-label': t('reply.delete'),
+            onClick: (event) => {
+              const seat = event?.currentTarget?.closest?.('[data-turn-tail]')
+              const turn = Number(seat?.dataset?.turnTail)
+              if (!Number.isInteger(turn) || turn < 1) return
+              ask({ kind: 'reply', sessionId, turn })
+            }
+          },
+          h(primitives.IconTrashOutlineRegular, { size: 14 })
+        )
+      )
+    }
+
+    /** The one dialog both affordances raise. */
+    function EraserConfirmDialog(props) {
+      const { useDeleteRequest, settleDelete: settle, runDelete: run, t } = props
+      const request = useDeleteRequest((value) => value)
+      const [phase, setPhase] = React.useState('idle')
+      const [failure, setFailure] = React.useState(null)
+      const [seen, setSeen] = React.useState(null)
+
+      // One dialog serves every request, so its progress and error state belong
+      // to the request identity, not to the component's lifetime.
+      const identity =
+        request === null ? null : `${request.kind}:${request.sessionId}:${request.turn ?? ''}`
+      if (seen !== identity) {
+        setSeen(identity)
+        setPhase('idle')
+        setFailure(null)
+      }
+
+      if (request === null) return null
+
+      const isSession = request.kind === 'session'
+      const confirm = () => {
+        if (phase === 'busy') return
+        setPhase('busy')
+        setFailure(null)
+        run(request).then(
+          () => setPhase('done'),
+          (error) => {
+            setFailure(String(error?.message ?? error))
+            setPhase('idle')
+          }
+        )
+      }
+
+      return h(
+        primitives.Modal,
+        {
+          open: true,
+          title: t(isSession ? 'dialog.session.title' : 'dialog.turn.title', { turn: request.turn }),
+          closeLabel: phase === 'busy' ? t('dialog.busy') : t('dialog.cancel'),
+          onClose: phase === 'busy' ? () => {} : settle,
+          footer: [
+            h(
+              primitives.Button,
+              {
+                key: 'cancel',
+                variant: 'ghost',
+                disabled: phase !== 'idle',
+                onClick: settle
+              },
+              t('dialog.cancel')
+            ),
+            h(
+              primitives.Button,
+              {
+                key: 'confirm',
+                variant: 'primary',
+                disabled: phase === 'busy' || phase === 'done',
+                onClick: confirm
+              },
+              phase === 'done' ? t('dialog.done') : phase === 'busy' ? t('dialog.busy') : t('dialog.confirm')
+            )
+          ]
+        },
+        h('p', { className: 'chat-eraser-body' }, t(isSession ? 'dialog.session.body' : 'dialog.turn.body', { turn: request.turn })),
+        isSession && typeof request.displayTitle === 'string'
+          ? h('p', { className: 'chat-eraser-body' }, `“${request.displayTitle}”`)
+          : null,
+        failure === null ? null : h('p', { className: 'chat-eraser-error' }, t('dialog.error', { message: failure }))
+      )
+    }
+
+    /**
+     * The notice a stale view raises: either a rewrite the harness has not
+     * re-read, or a control the view still offers around a removal that already
+     * happened.
+     */
+    function EraserNoticeDialog(props) {
+      const { useNoticeRequest, dismissNotice, t } = props
+      const notice = useNoticeRequest((value) => value)
+      if (notice === null) return null
+      const body = notice.kind === 'session' ? 'notice.session.body' : 'notice.turn.body'
+      return h(
+        primitives.Modal,
+        {
+          open: true,
+          title: t('notice.title'),
+          closeLabel: t('notice.close'),
+          onClose: dismissNotice,
+          footer: [h(primitives.Button, { key: 'close', variant: 'primary', onClick: dismissNotice }, t('notice.close'))]
+        },
+        h('p', { className: 'chat-eraser-body' }, t(body))
+      )
+    }
+
+    /**
+     * Register every contribution. `ctx.slots.inject` waits for each owner's
+     * declaration and re-registers after the declaring slot collapses, so load
+     * order against the shipped plugins does not matter.
+     * @param ctx - browser plugin context carrying `slots` and `locale`.
+     */
+    function apply(ctx) {
+      ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'chat-eraser: dictionaries')
+
+      // The workspace's navigation layer, used to reopen a session the host
+      // released; absent on a composition without the Workspace browser.
+      ctx.inject(['uiWorkspace'], (scope) => {
+        workspaceUi = scope.uiWorkspace ?? null
+        return () => {
+          workspaceUi = null
+        }
+      })
+
+      ctx.slots.inject('sidebar.workspaces.session.menu.item', () =>
+        ctx.slots.register(
+          {
+            name: 'sidebar.workspaces.session.menu.item',
+            id: 'chat-eraser.delete-session',
+            // After the shipped Archive row (400); the separator opens the plugin group.
+            order: 500,
+            locale: NS,
+            inject: () => ({ requestDelete })
+          },
+          DeleteSessionMenuItem
+        )
+      )
+
+      ctx.slots.inject('conversation.chat.turnTail', () =>
+        ctx.slots.register(
+          {
+            name: 'conversation.chat.turnTail',
+            id: 'chat-eraser.delete-turn',
+            order: 10,
+            locale: NS,
+            // A Session-scoped slot hands the entry its Session id here.
+            inject: (sessionId) => ({ sessionId, requestDelete })
+          },
+          DeleteTurnButton
+        )
+      )
+
+      ctx.slots.inject('shell.overlay', () =>
+        ctx.slots.register(
+          {
+            name: 'shell.overlay',
+            id: 'chat-eraser.confirm',
+            order: 60,
+            locale: NS,
+            inject: () => ({ hooks: { deleteRequest }, settleDelete, runDelete })
+          },
+          EraserConfirmDialog
+        )
+      )
+
+      ctx.slots.inject('shell.overlay', () =>
+        ctx.slots.register(
+          {
+            name: 'shell.overlay',
+            id: 'chat-eraser.notice',
+            order: 61,
+            locale: NS,
+            inject: () => ({
+              hooks: { noticeRequest },
+              dismissNotice: () => {
+                noticeRequest.set(null)
+              }
+            })
+          },
+          EraserNoticeDialog
+        )
+      )
+    }
+
+    return { name: 'dsh-chat-eraser', inject: ['slots', 'locale'], apply }
+  }
+})

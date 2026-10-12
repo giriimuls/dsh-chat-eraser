@@ -1,0 +1,45 @@
+{
+  "name": "dsh-chat-eraser",
+  "version": "0.1.4",
+  "private": true,
+  "description": "Edit or delete a prompt from the transcript: a pen icon on every user message, a delete/edit pair in the turn tail, delete on a reply, and delete the whole session from the sidebar's ... menu. DeepSeek Harness (dsh) plugin: host half rewrites the JSONL/Zstandard session log, client half owns the UI affordances.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "session",
+    "transcript",
+    "delete"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-chat"
+      ]
+    }
+  }
+}
